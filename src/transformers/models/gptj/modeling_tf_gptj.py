@@ -180,8 +180,8 @@ class TFGPTJAttention(tf.keras.layers.Layer):
         causal_mask = self.get_causal_mask(key_length, query_length)
 
         # Keep the attention weights computation in fp32 to avoid overflow issues
-        query = tf.cast(query, tf.float32)
-        key = tf.cast(key, tf.float32)
+        # query = tf.cast(query, tf.float32)
+        # key = tf.cast(key, tf.float32)
 
         attn_weights = tf.matmul(query, key, transpose_b=True)
         attn_weights = tf.where(causal_mask, attn_weights, self.get_masked_bias(attn_weights.dtype))
@@ -420,9 +420,9 @@ class TFGPTJMainLayer(tf.keras.layers.Layer):
             # positions we want to attend and -10000.0 for masked positions.
             # Since we are adding it to the raw scores before the softmax, this is
             # effectively the same as removing these entirely.
-            one_cst = tf.constant(1.0)
+            one_cst = tf.constant(1.0,tf.keras.backend.floatx())
             attention_mask = tf.cast(attention_mask, dtype=one_cst.dtype)
-            attention_mask = tf.multiply(tf.subtract(one_cst, attention_mask), tf.constant(-10000.0))
+            attention_mask = tf.multiply(tf.subtract(one_cst, attention_mask), tf.constant(-10000.0,tf.keras.backend.floatx()))
 
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
