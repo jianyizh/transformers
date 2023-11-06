@@ -67,7 +67,7 @@ def stable_softmax(logits: tf.Tensor, axis: Optional[int] = None, name: Optional
     """
     # TODO: When the issue linked above gets sorted, add a check on TF version here and use the original function if
     # it has the fix. After we drop the support for unfixed versions, remove this function.
-    return tf.nn.softmax(logits=logits + 1e-9, axis=axis, name=name)
+    return tf.nn.softmax(logits=logits, axis=axis, name=name)
 
 
 def functional_layernorm(inputs, weight, bias, epsilon=1e-5, axis=-1):
