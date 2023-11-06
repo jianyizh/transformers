@@ -20,6 +20,7 @@ from typing import Optional, Tuple, Union
 
 import numpy as np
 import tensorflow as tf
+import intel_extension_for_tensorflow as itex
 
 from ...activations_tf import get_tf_activation
 from ...file_utils import (
@@ -237,17 +238,13 @@ class TFGPTJAttention(tf.keras.layers.Layer):
         sincos = tf.cast(tf.gather(self.embed_positions, position_ids, axis=0), hidden_states.dtype)
         sincos = tf.split(sincos, 2, axis=-1)
         if self.rotary_dim is not None:
-            k_rot = key[:, :, :, : self.rotary_dim]
-            k_pass = key[:, :, :, self.rotary_dim :]
-
-            q_rot = query[:, :, :, : self.rotary_dim]
-            q_pass = query[:, :, :, self.rotary_dim :]
-
-            k_rot = apply_rotary_pos_emb(k_rot, sincos)
-            q_rot = apply_rotary_pos_emb(q_rot, sincos)
-
-            key = tf.concat((k_rot, k_pass), axis=-1)
-            query = tf.concat((q_rot, q_pass), axis=-1)
+            sin_pos, cos_pos = sincos
+            sin_pos = tf.repeat(sin_pos[:, :, None, :], 2, 3)
+            cos_pos = tf.repeat(cos_pos[:, :, None, :], 2, 3)
+            query,key=itex.ops.qk_rotary_positional_embedding(query,key,sin_pos,cos_pos,
+                                                    rotary_dim=self.rotary_dim,
+                                                    num_attention_heads=self.num_attention_heads,
+                                                    head_dim=self.head_dim)
         else:
             key = apply_rotary_pos_emb(key, sincos)
             query = apply_rotary_pos_emb(query, sincos)
