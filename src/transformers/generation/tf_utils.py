@@ -818,9 +818,14 @@ class TFGenerationMixin:
         requires_attention_mask = "encoder_outputs" not in model_kwargs
 
         if model_kwargs.get("attention_mask", None) is None and requires_attention_mask and accepts_attention_mask:
-            model_kwargs["attention_mask"] = self._prepare_attention_mask_for_generation(
-                inputs_tensor, generation_config.pad_token_id, generation_config.eos_token_id
-            )
+            if generation_config.pad_token_id == generation_config.eos_token_id and (generation_config.pad_token_id is not None):
+                self.attention_mask_always_none = 1
+                model_kwargs["attention_mask"] = shape_list(inputs_tensor)[0]
+            else:
+                model_kwargs["attention_mask"] = self._prepare_attention_mask_for_generation(
+                    inputs_tensor, generation_config.pad_token_id, generation_config.eos_token_id
+                )
+                self.attention_mask_always_none = 0
 
         # decoder-only models should use left-padding for generation
         if not self.config.is_encoder_decoder:
@@ -1304,12 +1309,13 @@ class TFGenerationMixin:
         if not is_encoder_decoder:
             if "attention_mask" in model_kwargs:
                 attention_mask = model_kwargs["attention_mask"]
-                model_kwargs["attention_mask"] = tf.concat(
-                    [attention_mask, tf.ones((shape_list(attention_mask)[0], 1), dtype=tf.int32)], axis=-1
-                )
-                if batch_size > 1:
-                    if shape_list(model_kwargs["past_key_values"][0][0])[0] > shape_list(model_kwargs["attention_mask"])[0]:
-                        model_kwargs["attention_mask"] = tf.tile(model_kwargs["attention_mask"],[beams,1])
+                if self.attention_mask_always_none == 0:
+                    model_kwargs["attention_mask"] = tf.concat(
+                        [attention_mask, tf.ones((shape_list(attention_mask)[0], 1), dtype=tf.int32)], axis=-1
+                    )
+                    if batch_size > 1:
+                        if shape_list(model_kwargs["past_key_values"][0][0])[0] > shape_list(model_kwargs["attention_mask"])[0]:
+                            model_kwargs["attention_mask"] = tf.tile(model_kwargs["attention_mask"],[beams,1])
 
         return model_kwargs
 
@@ -2340,7 +2346,7 @@ class TFGenerationMixin:
                 model_kwargs["encoder_outputs"]["last_hidden_state"] = flatten_beam_dim(
                     model_kwargs["encoder_outputs"]["last_hidden_state"]
                 )
-            if "attention_mask" in model_kwargs:
+            if "attention_mask" in model_kwargs and self.attention_mask_always_none == 0:
                 if model_kwargs.get("past_key_values") is None:
                    model_kwargs["attention_mask"]= model_kwargs["attention_mask"][:,:1,...]
                 model_kwargs["attention_mask"] = flatten_beam_dim(model_kwargs["attention_mask"])
@@ -2419,8 +2425,9 @@ class TFGenerationMixin:
                 else:
                     input_ids = tf.expand_dims(running_sequences[:, :, cur_len - 1], -1)
                 model_inputs = self.prepare_inputs_for_generation(
-                    flatten_beam_dim(input_ids), use_cache=use_cache, **{"past_key_values":past_key_values,"attention_mask":attention_mask}
+                    flatten_beam_dim(input_ids), use_cache=use_cache, **{"past_key_values":past_key_values,"attention_mask":attention_mask,"attention_mask_always_none":self.attention_mask_always_none,"current_length":cur_len}
                 )
+                model_inputs["attention_mask_always_none"]=self.attention_mask_always_none
                 model_outputs = self(
                     **model_inputs,
                     return_dict=True,
@@ -2597,7 +2604,7 @@ class TFGenerationMixin:
                 if use_xla and False:
                     next_model_kwargs = self._update_model_kwargs_for_xla_generation(
                         model_outputs=model_outputs,
-                        model_kwargs={"past_key_values":past_key_values,"attention_mask":attention_mask},
+                        model_kwargs={"past_key_values":past_key_values,"attention_mask":attention_mask,"attention_mask_always_none":self.attention_mask_always_none,"current_length":cur_len},
                         cur_len=cur_len,
                         max_length=max_length,
                         batch_size=(batch_size * (1 if is_first else num_beams)),
@@ -2606,7 +2613,7 @@ class TFGenerationMixin:
                     )
                 else:
                     next_model_kwargs = self._update_model_kwargs_for_generation(
-                        model_outputs, {"past_key_values":past_key_values,"attention_mask":attention_mask}, is_encoder_decoder=self.config.is_encoder_decoder, batch_size=batch_size, beams = num_beams
+                        model_outputs, {"past_key_values":past_key_values,"attention_mask":attention_mask,"attention_mask_always_none":self.attention_mask_always_none,"current_length":cur_len}, is_encoder_decoder=self.config.is_encoder_decoder, batch_size=batch_size, beams = num_beams
                     )
 
                 return (
@@ -2621,7 +2628,6 @@ class TFGenerationMixin:
                     next_is_sent_finished,
                     next_model_kwargs["past_key_values"],
                     next_model_kwargs["attention_mask"],
-
                 )
 
                 # 5. run generation
@@ -2656,7 +2662,7 @@ class TFGenerationMixin:
                     beam_indices,
                     is_sent_finished,
                     past_key_values,
-                    attention_mask
+                    attention_mask,
                 ) = gen1()
 
             # 2-to-n generation steps can then be run in autoregressive fashion (only in case 1st generation step does
@@ -2680,7 +2686,7 @@ class TFGenerationMixin:
                             beam_indices.get_shape(),
                             is_sent_finished.get_shape(),
                             tuple((tf.TensorShape([None,16,None,256]),tf.TensorShape([None,16,None,256])) for _ in range(28)),
-                            tf.TensorShape([None,None])
+                            attention_mask.get_shape(),
                         )
                         return tf.while_loop(
                             beam_search_cond_fn,
@@ -2696,7 +2702,7 @@ class TFGenerationMixin:
                                 beam_indices,
                                 is_sent_finished,
                                 past_key_values,
-                                attention_mask
+                                attention_mask,
                             ),
                             maximum_iterations=maximum_iterations,
                             shape_invariants = all_shapes
@@ -2713,7 +2719,7 @@ class TFGenerationMixin:
                         beam_indices,
                         is_sent_finished,
                         _,
-                        _
+                        _,
                     ) = gen2()
 
                     with tf.control_dependencies([sequences]):

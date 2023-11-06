@@ -130,11 +130,15 @@ class TFGPTJAttention(tf.keras.layers.Layer):
             tf.cast(tf.experimental.numpy.tril(tf.ones((self.max_positions, self.max_positions))), tf.int8),
             (1, 1, self.max_positions, self.max_positions),
         )
+        self.upper_mask = -tf.cast(self.lower_triangle_mask == 0,dtype=tf.float32)*1e9/ self.scale_attn
         pos_embd_dim = self.rotary_dim or self.embed_dim
         self.embed_positions = create_sinusoidal_positions(self.max_positions, pos_embd_dim)
 
     def get_causal_mask(self, key_length, query_length) -> tf.Tensor:
         return tf.cast(self.lower_triangle_mask[:, :, key_length - query_length : key_length, :key_length], tf.bool)
+
+    def get_total_mask(self, key_length, query_length) -> tf.Tensor:
+        return self.upper_mask[:, :, key_length - query_length : key_length, :key_length]
 
     @staticmethod
     def get_masked_bias(dtype: tf.DType) -> tf.Tensor:
@@ -174,23 +178,30 @@ class TFGPTJAttention(tf.keras.layers.Layer):
         value: tf.Tensor,
         attention_mask: tf.Tensor | None = None,
         head_mask: tf.Tensor | None = None,
+        attention_mask_always_none: int =0,
     ) -> Tuple[tf.Tensor, tf.Tensor]:
         # compute causal mask from causal mask buffer
         query_length, key_length = shape_list(query)[-2], shape_list(key)[-2]
-        causal_mask = self.get_causal_mask(key_length, query_length)
 
         # Keep the attention weights computation in fp32 to avoid overflow issues
         # query = tf.cast(query, tf.float32)
         # key = tf.cast(key, tf.float32)
 
         attn_weights = tf.matmul(query, key, transpose_b=True)
-        attn_weights = tf.where(causal_mask, attn_weights, self.get_masked_bias(attn_weights.dtype))
+        if attention_mask_always_none == 0:
+            causal_mask = self.get_causal_mask(key_length, query_length)
+            attn_weights = tf.where(causal_mask, attn_weights, self.get_masked_bias(attn_weights.dtype))
+        
+            attn_weights = attn_weights / self.scale_attn
 
-        attn_weights = attn_weights / self.scale_attn
-
-        if attention_mask is not None:
-            # Apply the attention mask
-            attn_weights = attn_weights + attention_mask
+            if attention_mask is not None:
+                # Apply the attention mask
+                attn_weights = attn_weights + attention_mask
+        if attention_mask_always_none == 1:
+            attn_weights = attn_weights / self.scale_attn
+            causal_mask = tf.cast(self.get_total_mask(key_length, query_length),attn_weights.dtype)
+            attn_weights = attn_weights + causal_mask
+        
 
         attn_weights = stable_softmax(attn_weights, axis=-1)
         attn_weights = tf.cast(attn_weights, value.dtype)
@@ -213,6 +224,7 @@ class TFGPTJAttention(tf.keras.layers.Layer):
         head_mask: tf.Tensor | None = None,
         use_cache: bool = False,
         output_attentions: bool = False,
+        attention_mask_always_none: int = 0,
     ):
         query = self.q_proj(hidden_states)
         key = self.k_proj(hidden_states)
@@ -255,7 +267,7 @@ class TFGPTJAttention(tf.keras.layers.Layer):
             present = None
 
         # compute self-attention: V x Softmax(QK^T)
-        attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
+        attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask,attention_mask_always_none=attention_mask_always_none)
 
         attn_output = self._merge_heads(attn_output)
         attn_output = self.out_proj(attn_output)
@@ -308,6 +320,7 @@ class TFGPTJBlock(tf.keras.layers.Layer):
         head_mask: tf.Tensor | None = None,
         use_cache: bool = False,
         output_attentions: bool = False,
+        attention_mask_always_none: int = 0,
     ):
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
@@ -319,6 +332,7 @@ class TFGPTJBlock(tf.keras.layers.Layer):
             head_mask=head_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
+            attention_mask_always_none=attention_mask_always_none,
         )  # attn_outputs: attn_output, present, (attentions)
         attn_output = attn_outputs[0]
         outputs = attn_outputs[1:]
@@ -385,6 +399,7 @@ class TFGPTJMainLayer(tf.keras.layers.Layer):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
+        attention_mask_always_none=0,
         training=False,
     ) -> Union[TFBaseModelOutputWithPast, Tuple[tf.Tensor]]:
         if input_ids is not None and inputs_embeds is not None:
@@ -405,8 +420,8 @@ class TFGPTJMainLayer(tf.keras.layers.Layer):
 
         if position_ids is None:
             position_ids = tf.expand_dims(tf.range(past_length, input_shape[-1] + past_length), axis=0)
-
-        if attention_mask is not None:
+        if attention_mask is not None and attention_mask_always_none == 0:
+            # if attention mask is always none, it will be 0,so we skip this part
             # We create a 3D attention mask from a 2D tensor mask.
             # Sizes are [batch_size, 1, 1, to_seq_length]
             # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
@@ -469,6 +484,7 @@ class TFGPTJMainLayer(tf.keras.layers.Layer):
                 use_cache=use_cache,
                 output_attentions=output_attentions,
                 training=training,
+                attention_mask_always_none=attention_mask_always_none,
             )
 
             hidden_states = outputs[0]
@@ -648,6 +664,7 @@ class TFGPTJModel(TFGPTJPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         training: Optional[bool] = False,
+        attention_mask_always_none: int = 0,
     ) -> Union[TFBaseModelOutputWithPast, Tuple[tf.Tensor]]:
         r"""
         use_cache (`bool`, *optional*, defaults to `True`):
@@ -668,6 +685,7 @@ class TFGPTJModel(TFGPTJPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             training=training,
+            attention_mask_always_none = attention_mask_always_none,
         )
 
         return outputs
@@ -703,12 +721,21 @@ class TFGPTJForCausalLM(TFGPTJPreTrainedModel, TFCausalLanguageModelingLoss):
 
         position_ids = kwargs.get("position_ids", None)
         attention_mask = kwargs.get("attention_mask", None)
-
         if attention_mask is not None and position_ids is None:
-            position_ids = tf.math.cumsum(attention_mask, axis=-1, exclusive=True)
-            if past_key_values:
-                position_ids = tf.expand_dims(position_ids[:, -1], -1)
-
+            if kwargs.get("attention_mask_always_none", 0) == 1:
+                if past_key_values:
+                    position_ids = kwargs.get("current_length",0)-1
+                    position_ids = tf.expand_dims(position_ids, 0)
+                    position_ids = tf.expand_dims(position_ids, 0)
+                    position_ids = tf.tile(position_ids,[shape_list(inputs)[0],1])
+                else:
+                    position_ids = tf.range(kwargs.get("current_length", 0))
+                    position_ids = tf.expand_dims(position_ids, 0)
+                    position_ids = tf.tile(position_ids,[shape_list(inputs)[0],1])
+            else:
+                position_ids = tf.math.cumsum(attention_mask, axis=-1, exclusive=True)
+                if past_key_values:
+                    position_ids = tf.expand_dims(position_ids[:, -1], -1)
         return {
             "input_ids": inputs,
             "attention_mask": attention_mask,
@@ -740,6 +767,7 @@ class TFGPTJForCausalLM(TFGPTJPreTrainedModel, TFCausalLanguageModelingLoss):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         training: Optional[bool] = False,
+        attention_mask_always_none : int = 0,
     ) -> Union[TFCausalLMOutputWithPast, Tuple[tf.Tensor]]:
         r"""
         labels (`np.ndarray` or `tf.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -747,7 +775,6 @@ class TFGPTJForCausalLM(TFGPTJPreTrainedModel, TFCausalLanguageModelingLoss):
             `labels = input_ids` Indices are selected in `[-100, 0, ..., config.vocab_size]` All labels set to `-100`
             are ignored (masked), the loss is only computed for labels in `[0, ..., config.vocab_size]`
         """
-
         transformer_outputs = self.transformer(
             input_ids=input_ids,
             past_key_values=past_key_values,
@@ -761,6 +788,7 @@ class TFGPTJForCausalLM(TFGPTJPreTrainedModel, TFCausalLanguageModelingLoss):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             training=training,
+            attention_mask_always_none=attention_mask_always_none,
         )
         hidden_states = transformer_outputs[0]
         lm_logits = self.lm_head(hidden_states)
@@ -836,6 +864,7 @@ class TFGPTJForSequenceClassification(TFGPTJPreTrainedModel, TFSequenceClassific
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         training: Optional[bool] = False,
+        attention_mask_always_none: int = 0,
     ) -> Union[TFSequenceClassifierOutputWithPast, Tuple[tf.Tensor]]:
         r"""
         labels (`np.ndarray` or `tf.Tensor` of shape `(batch_size,)`, *optional*):
@@ -857,6 +886,7 @@ class TFGPTJForSequenceClassification(TFGPTJPreTrainedModel, TFSequenceClassific
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             training=training,
+            attention_mask_always_none=attention_mask_always_none,
         )
         hidden_states = transformer_outputs[0]
         logits = self.score(hidden_states)
@@ -949,6 +979,7 @@ class TFGPTJForQuestionAnswering(TFGPTJPreTrainedModel, TFQuestionAnsweringLoss)
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         training: Optional[bool] = False,
+        attention_mask_always_none: int = 0,
     ) -> Union[TFQuestionAnsweringModelOutput, Tuple[tf.Tensor]]:
         r"""
         start_positions (`np.ndarray` or `tf.Tensor` of shape `(batch_size,)`, *optional*):
@@ -973,6 +1004,7 @@ class TFGPTJForQuestionAnswering(TFGPTJPreTrainedModel, TFQuestionAnsweringLoss)
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             training=training,
+            attention_mask_always_none=attention_mask_always_none,
         )
         sequence_output = transformer_outputs[0]
 
