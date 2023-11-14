@@ -21,6 +21,7 @@ from typing import Optional, Tuple, Union
 import numpy as np
 import tensorflow as tf
 import intel_extension_for_tensorflow as itex
+from tensorflow.python.framework import config
 
 from ...activations_tf import get_tf_activation
 from ...file_utils import (
@@ -199,9 +200,13 @@ class TFGPTJAttention(tf.keras.layers.Layer):
                 # Apply the attention mask
                 attn_weights = attn_weights + attention_mask
         if attention_mask_always_none == 1:
+            if config.list_logical_devices('XPU'):
+                causal_mask = self.get_causal_mask(key_length, query_length)
+                attn_weights = tf.where(causal_mask, attn_weights, self.get_masked_bias(attn_weights.dtype))
             attn_weights = attn_weights / self.scale_attn
-            causal_mask = tf.cast(self.get_total_mask(key_length, query_length),attn_weights.dtype)
-            attn_weights = attn_weights + causal_mask
+            if not config.list_logical_devices('XPU'):
+                causal_mask = tf.cast(self.get_total_mask(key_length, query_length),attn_weights.dtype)
+                attn_weights = attn_weights + causal_mask
         
 
         attn_weights = stable_softmax(attn_weights, axis=-1)
