@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
 import tensorflow as tf
+import intel_extension_for_tensorflow as itex
 from tensorflow.compiler.tf2xla.python.xla import dynamic_update_slice
 
 from ..modeling_tf_outputs import TFCausalLMOutputWithPast, TFSeq2SeqLMOutput
@@ -458,7 +459,6 @@ class TFGenerationMixin:
     You do not need to call any of the above methods directly. Pass custom parameter values to 'generate' instead. To
     learn more about decoding strategies refer to the [text generation strategies guide](../generation_strategies).
     """
-
     _seed_generator = None
 
     @property
@@ -2110,6 +2110,16 @@ class TFGenerationMixin:
             return generated
 
     @staticmethod
+    def _gather_kv_cache_beams(nested, beam_indices, batch_axis=0, input_length=0):
+        """Gathers the beam slices indexed by beam_indices into new beam array."""
+        assert batch_axis == 0
+        def gather_fn(tensor):
+            gathered_tensor = itex.ops.beam_select_kv_cache(tensor, beam_indices, input_length=input_length)
+            return gathered_tensor
+
+        return tf.nest.map_structure(gather_fn, nested)
+
+    @staticmethod
     def _gather_beams(nested, beam_indices, batch_axis=0):
         """Gathers the beam slices indexed by beam_indices into new beam array."""
 
@@ -2307,6 +2317,7 @@ class TFGenerationMixin:
 
             # 3. init tensors to use for "xla-compileable" generate function
             batch_size, num_beams, cur_len = shape_list(input_ids)
+            self.input_length = cur_len
 
             # per batch, beam-item holding current token in loop, pre-populated with `pad_token_id`
             input_ids_padding = tf.ones((batch_size, num_beams, max_length - cur_len), dtype=tf.int32) * (
@@ -2596,7 +2607,7 @@ class TFGenerationMixin:
                         model_outputs.past_key_values,
                     )
                     next_running_indices = self._gather_beams(topk_current_beam_indices, next_topk_indices)
-                    next_cache = self._gather_beams(cache, next_running_indices, batch_axis=cache_batch_axis)
+                    next_cache = self._gather_beams(cache, next_running_indices, batch_axis=cache_batch_axis) if is_first else self._gather_kv_cache_beams(cache, next_running_indices, batch_axis=cache_batch_axis, input_length=self.input_length)
                     model_outputs["past_key_values"] = tf.nest.map_structure(
                         lambda tensor: flatten_beam_dim(tensor, batch_axis=cache_batch_axis), next_cache
                     )
