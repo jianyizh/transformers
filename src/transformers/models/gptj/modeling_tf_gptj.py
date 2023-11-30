@@ -200,11 +200,11 @@ class TFGPTJAttention(tf.keras.layers.Layer):
                 # Apply the attention mask
                 attn_weights = attn_weights + attention_mask
         if attention_mask_always_none == 1:
-            if config.list_logical_devices('XPU'):
+            if config.list_logical_devices('XPU') and query_length > 1:
                 causal_mask = self.get_causal_mask(key_length, query_length)
                 attn_weights = tf.where(causal_mask, attn_weights, self.get_masked_bias(attn_weights.dtype))
             attn_weights = attn_weights / self.scale_attn
-            if not config.list_logical_devices('XPU'):
+            if (not config.list_logical_devices('XPU')) and query_length > 1:
                 causal_mask = tf.cast(self.get_total_mask(key_length, query_length),attn_weights.dtype)
                 attn_weights = attn_weights + causal_mask
         
