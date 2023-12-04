@@ -1,0 +1,25 @@
+diff --git a/src/transformers/models/gptj/modeling_tf_gptj.py b/src/transformers/models/gptj/modeling_tf_gptj.py
+index fbdf7fa25..1e3bd1d2c 100644
+--- a/src/transformers/models/gptj/modeling_tf_gptj.py
++++ b/src/transformers/models/gptj/modeling_tf_gptj.py
+@@ -267,11 +267,15 @@ class TFGPTJAttention(tf.keras.layers.Layer):
+             present = (key, value)
+         else:
+             present = None
+-
+-        # compute self-attention: V x Softmax(QK^T)
+-        attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask,attention_mask_always_none=attention_mask_always_none)
+-
+-        attn_output = self._merge_heads(attn_output)
++
++        attn_weights = None
++        if not output_attentions and config.list_logical_devices('XPU'):
++            attn_output = itex.ops.scaled_dot_product_attention(query, key, value,is_training=False)
++            attn_output = tf.reshape(attn_output,(shape_list(query)[0],shape_list(query)[-2],self.num_attention_heads*self.head_dim))
++        else:
++            # compute self-attention: V x Softmax(QK^T)
++            attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask,attention_mask_always_none=attention_mask_always_none)
++            attn_output = self._merge_heads(attn_output)
+         attn_output = self.out_proj(attn_output)
+         attn_output = self.resid_dropout(attn_output)
+
