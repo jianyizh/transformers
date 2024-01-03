@@ -167,7 +167,8 @@ class FlaxRobertaEmbeddings(nn.Module):
         # Embed
         inputs_embeds = self.word_embeddings(input_ids.astype("i4"))
         position_embeds = self.position_embeddings(position_ids.astype("i4"))
-        token_type_embeddings = self.token_type_embeddings(token_type_ids.astype("i4"))
+        token_type_embeddings = self.token_type_embeddings(jax.numpy.zeros((1,1)).astype("i4"))
+        # token_type_embeddings = self.token_type_embeddings(token_type_ids.astype("i4"))
 
         # Sum all embeddings
         hidden_states = inputs_embeds + token_type_embeddings + position_embeds
